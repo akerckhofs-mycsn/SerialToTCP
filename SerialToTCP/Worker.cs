@@ -36,8 +36,10 @@ namespace SerialToTCP
             {
                 if (tcpListener!.Pending())
                 {
-                    tcpClients?.Add(await tcpListener.AcceptTcpClientAsync());
-                    _logger.LogInformation("Accepted client.");
+                    var client = await tcpListener.AcceptTcpClientAsync();
+                    tcpClients?.Add(client);
+                    _logger.LogInformation("Accepted client at {ipAddress}",
+                        (client?.Client?.RemoteEndPoint as IPEndPoint)?.Address);
                 }
 
                 await Task.Delay(100, stoppingToken);
@@ -54,7 +56,8 @@ namespace SerialToTCP
 
             Policy.Handle<IOException>()
                   ?.Or<UnauthorizedAccessException>()
-                  .WaitAndRetryForever(attempt => TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 500))
+                  .WaitAndRetryForever(attempt => TimeSpan.FromMilliseconds(Math.Min(5000, Math.Pow(2, attempt) * 500)),
+                      (exception, i, arg3) => { _logger.LogError(exception.Message); })
                   ?.Execute(serialPort.Open);
 
             _logger.LogInformation("Opened Serial Port..");
@@ -67,7 +70,7 @@ namespace SerialToTCP
                   .WaitAndRetryForever(attempt =>
                           TimeSpan.FromMilliseconds(Math.Min(5000, Math.Pow(2, attempt) * 500)),
                       (exception, i, arg3) => {
-                          _logger.LogError($"[{((SocketException) exception).ErrorCode}]{exception.Message}");
+                          _logger.LogError($"[{(exception as SocketException).ErrorCode}]{exception.Message}");
                       })
                   ?.Execute(tcpListener.Start);
 
@@ -75,18 +78,23 @@ namespace SerialToTCP
         }
 
         private void SerialPortOnErrorReceived(object sender, SerialErrorReceivedEventArgs e) {
-            _logger.LogError($"Serial port error");
             var sp = (SerialPort) sender;
             if (sp == null)
             {
                 Policy.Handle<IOException>()
-                      .WaitAndRetryForever(attempt => TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 500))
+                      .WaitAndRetryForever(attempt => TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 500),
+                          (exception, i, arg3) => {
+                              _logger.LogError("Failed to initialize serial port: {message}", exception?.Message);
+                          })
                       ?.Execute(InitializeSerialPort);
             } else if (!sp.IsOpen)
             {
                 Policy.Handle<IOException>()
                       ?.Or<UnauthorizedAccessException>()
-                      .WaitAndRetryForever(attempt => TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 500))
+                      .WaitAndRetryForever(attempt => TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 500),
+                          (exception, i, arg3) => {
+                              _logger.LogError("Failed to open serial port: {message}", exception?.Message);
+                          })
                       ?.Execute(serialPort.Open);
             }
         }
@@ -95,7 +103,7 @@ namespace SerialToTCP
             var sp = (SerialPort) sender;
             var data = sp?.ReadExisting();
 
-            _logger.LogInformation(data);
+            _logger.LogInformation("Received {data} from {port}", data, portName);
 
             tcpClients?.ForEach(client => {
                 if (!client.Connected)
@@ -108,6 +116,8 @@ namespace SerialToTCP
                         var stream = client.GetStream();
                         stream.Write(Encoding.UTF8.GetBytes(data));
                         stream.Flush();
+                        _logger.LogDebug("Sending data to client at {ipAddress}",
+                            (client.Client?.RemoteEndPoint as IPEndPoint)?.Address);
                     } catch (IOException exception)
                     {
                         _logger.LogError($"[TCP Server] {exception.Message}");

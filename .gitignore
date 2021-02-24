@@ -448,3 +448,4 @@ FodyWeavers.xsd
 .history/
 
 /.idea/
+/SerialToTCP/out/
